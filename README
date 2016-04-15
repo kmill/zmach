@@ -1,0 +1,33 @@
+zmach is a (semi-functional) Javascript-targeting Z-machine emulator.
+It only implements version 5 of the machine (i.e., z5 files when they
+are named correctly).
+
+The technique is to decompile the bytecode dynamically, recompiling it
+as Javascript, using an emscripten-inspired algorithm to generate
+switch-less code.
+
+To handle context switching (for instance, 'aread' for user input), we
+implement a method to reify the call stack as Javascript objects only
+when this is needed, at the expense of wrapping function bodies in a
+try-catch block and storing an integer into a local variable before
+call sites.  In principle, this should also allow saving a game in
+Quetzal, but this has not yet been implemented.
+
+The emstripten-inspired relooper is a more streamlined version of
+their algorithm.  However, it is at present implemented inefficiently.
+
+The intent of this project was to have an excuse to understand the
+relooper, and to attempt the context resumption described above.  It
+might never be finished.  However, it does seem to be able to play
+part of Zork I without errors now.
+
+To try it out:
+
+1. run "node convert_zcode.js $storyfile.z5", which produces
+   "$storyfile.z5.js" (or use your favorite technique for doing base64
+   encoding.  Just call "loadData('base64', '$your-base64-string')" in
+   the browser.)
+
+2. edit zmach.html to load '$storyfile.z5.js'
+
+3. open zmach.html

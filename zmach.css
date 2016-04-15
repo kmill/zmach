@@ -1,0 +1,57 @@
+.upperWindow {
+    font-family: "Monaco", monospace;
+    white-space: pre;
+    font-size: 14px;
+    position: fixed;
+    z-index: 1;
+}
+
+.upperChar {
+    display: inline;
+}
+
+.heightKeeper {
+    visibility: hidden;
+}
+
+.textItalic {
+    font-style: italic;
+}
+
+.textBold {
+    font-weight: bold;
+}
+
+.textFixed {
+    font-family: 'Inconsolata', "Monaco", monospace;
+    white-space: pre;
+    font-size: 14px;
+}
+
+.lowerWindow {
+    position: absolute;
+    padding: 1px;
+    padding-top: 1em;
+    font-family: 'PT Serif', "Times New Roman", serif;
+    font-size: 16px;
+/*    line-height: 18px;*/
+}
+
+.lowerWindow .line {
+    min-height: 18px;
+}
+
+
+.userinput {
+    padding: 0;
+    margin: 0;
+    font-family: 'PT Serif', "Times New Roman", serif;
+    font-size: 16px;
+    display: inline;
+    border: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+}
+.userinput:focus {
+    outline: none;
+}
