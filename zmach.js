@@ -633,7 +633,7 @@ function attachOpcodes(disassembler) {
   op(132, "get_prop_length", {store:1}, mk_extern("get_prop_length"));
   op(133, "inc", {}, mk_incdec(true));
   op(134, "dec", {}, mk_incdec(false));
-  op(135, "print_addr", {}, mk_extern("print_addr"));
+  op(135, "print_addr", {}, mk_extern("print"));
   op(136, "call_1s", {call:1,store:1}, mk_call);
   op(137, "remove_obj", {}, mk_extern("remove_obj"));
   op(138, "print_obj", {}, mk_extern("print_obj"));
@@ -1117,7 +1117,7 @@ function convert_routine_to_js(zmach, rname, locals, code, pauseable, is_cont) {
     cb.dedent("}");
     cb.dedent("}");
   }
-  cb.add("throw new Error('fell off of routine');");
+  cb.add("throw new Error('fell off end of routine');");
   cb.dedent("}");
 
   var vardefs = "";
@@ -2210,6 +2210,42 @@ ZMachine.prototype.put_prop = function (obj, prop, val) {
   }
   throw new Error("property does not exist for object");
 };
+ZMachine.prototype.random = function (range) {
+  function random32() {
+    var top = (Math.random()*(1<<16))|0;
+    var bot = (Math.random()*(1<<16))|0;
+    return ((top<<16)|bot)>>>0;
+  }
+  function reseed() {
+    return {
+      x:random32(),
+      y:random32(),
+      z:random32(),
+      w:random32(),
+      v:random32()
+    };
+  }
+  if (range === 0) {
+    this._random_state = reseed();
+    return 0;
+  }
+  var st = this._random_state;
+  if (!st) {
+    st = this._random_state = reseed();
+  }
+  if (range < 0) {
+    st.x = st.y = st.z = st.w = st.v = (range>>>0);
+    return 0;
+  }
+
+  function xorshift() {
+    // https://groups.google.com/forum/#!msg/comp.lang.c/qZFQgKRCQGg/rmPkaRHqxOMJ
+    var t=(st.x^(st.x>>>7)); st.x=st.y; st.y=st.z; st.z=st.w; st.w=st.v;
+    st.v=((st.v^(st.v<<6))^(t^(t<<13)))>>>0;
+    return Math.imul(st.y+st.y+1,st.v)>>>0;
+  }
+  return 1 + xorshift() % range;
+};
 ZMachine.prototype.erase_window = function (num) {
   num = num << 16 >> 16;
   if (num === -1) {
@@ -2279,7 +2315,11 @@ ZMachine.prototype.print_num = function (num) {
 };
 ZMachine.prototype.print_obj = function (obj) {
   var props = this.getU16(this.obj_entry(obj) + 12);
-  this.print(props + 1);
+  if (this.getU8(props) !== 0) { // this check prevents "The xc ec
+                                 // knwall munz doesn't lead
+                                 // downward."
+    this.print(props + 1);
+  }
 };
 var transcript =
       // [
