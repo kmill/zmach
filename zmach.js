@@ -1493,11 +1493,11 @@ ZMachine.prototype.outer_resume = function (frame, ret) {
   }
 };
 ZMachine.prototype.handlePause = function (pause) {
+  var self = this;
   switch (pause.action) {
   case "aread":
     var read_buffer = pause.args[0];
     var init = this.data.subarray(read_buffer+2, read_buffer+2+this.getU8(1+read_buffer));
-    var self = this;
     this.screen.read(this.unicodeFromZSCII(init), function (str) {
       self.do_aread(read_buffer, pause.args[1], str);
       self.outer_resume(pause.frame, 13);
@@ -1505,6 +1505,11 @@ ZMachine.prototype.handlePause = function (pause) {
 //      console.log(pause);
 //    pause.frame.describe();
 
+    break;
+  case "read_char":
+    this.screen.read_char(function (c) {
+      self.outer_resume(pause.frame, c);
+    });
     break;
   default:
     throw new Error("Unhandled pause action: " + pause.action);
@@ -2353,6 +2358,11 @@ ZMachine.prototype.do_aread = function (text_buffer, parse_buffer, str) {
     //console.log("parse_buffer " + Array.from(this.data.subarray(parse_buffer, parse_buffer + 20)).join(' '));
   }
 };
+ZMachine.prototype.read_char = function (one, time, routine) {
+  if (one !== 1)
+    throw new Error("first argument must be 1");
+  throw new PauseException("read_char", [time|0, routine|0], null);
+};
 ZMachine.prototype.output_stream = function (number, table) {
   number = number << 16 >> 16;
   if (number === 3) {
@@ -2442,9 +2452,15 @@ function ZScreen($dest, lines, cols) {
   this.$input.hide();
 
   var self = this;
-  this.$input.on("keydown", function (e) {
-    if (e.which === 13) {
-      self.inputEntered();
+  this.$el.attr("tabindex", "1");
+  this.read_char_callback = null;
+  this.$el.on("keydown.read_char", function (e) {
+    if (self.read_char_callback) {
+      e.preventDefault();
+      e.stopPropagation();
+      var rcc = self.read_char_callback;
+      self.read_char_callback = null;
+      rcc(e.keyCode); // TODO translate properly
     }
   });
   
@@ -2489,6 +2505,8 @@ ZScreen.prototype.split_window = function (lines) {
       $char.appendTo($line);
     }
   }
+  var upperHeight = this.upperWindow.$el.height();
+  this.lowerWindow.$el.css("padding-top", upperHeight + 10);
   if ($char) {
     this.lowerWindow.$el.width(this.upperWindow.$el.width());
   }
@@ -2533,7 +2551,7 @@ ZScreen.prototype.print = function (str) {
         $char[0].style.backgroundColor = bg;
       }
       this.cursor.col++;
-      if (this.cursor.col >= this.cols) {
+      if (this.cursor.col > this.cols) {
         this.cursor.line++;
         this.cursor.col = 1;
       }
@@ -2621,11 +2639,23 @@ ZScreen.prototype.setBackground = function (rgb15) {
 ZScreen.prototype.read = function (init, callback) {
   this.readCallback = callback;
   this.$curLine.append(this.$input);
+  var self = this;
+  this.$input.on("keydown.read", function (e) {
+    if (e.which === 13) {
+      e.preventDefault();
+      e.stopPropagation();
+      self.inputEntered();
+    }
+  });
   this.$input.val(init);
   this.$input.show();
   var inpWidth = this.lowerWindow.$el.innerWidth() - this.$input.position().left;
   this.$input.width(inpWidth-4);
   this.$input.focus();
+};
+ZScreen.prototype.read_char = function (callback) {
+  this.read_char_callback = callback;
+  this.$el.focus();
 };
 ZScreen.prototype.inputEntered = function () {
   var text = this.$input.val();
