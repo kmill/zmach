@@ -67,3 +67,10 @@
     left: 20px;
     bottom: 20px;
 }
+
+.debug {
+    position: fixed;
+    z-index: 999;
+    right:0;
+    top:0;
+}

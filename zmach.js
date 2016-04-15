@@ -1543,7 +1543,7 @@ ZMachine.prototype.lex = function (textaddr, parseaddr) {
   }
 
   var self = this;
-  function find_word(chars) {
+  function find_word(wordnum, chars) {
     var word = encodedToInt(self.fromZSCII(0x5, chars));
     var lo = 0;
     var hi = num_entries-1;
@@ -1560,6 +1560,10 @@ ZMachine.prototype.lex = function (textaddr, parseaddr) {
       } else if (word > entryWord) {
         lo = mid + 1;
       }
+    }
+    if (wordnum === 1 && chars.length === 1 && chars[0] === 'x'.charCodeAt(0)) {
+      // Zork I doesn't supply this synonym.
+      return find_word(-1, self.unicodeToZSCII("examine"));
     }
     return 0;
   }
@@ -1580,15 +1584,15 @@ ZMachine.prototype.lex = function (textaddr, parseaddr) {
     } else if (c !== 32 && sepidx === -1) {
       word.push(c);
     } else if (word.length > 0) {
-      record(parseidx++, find_word(word), word.length, i+2-word.length);
+      record(parseidx++, find_word(i, word), word.length, i+2-word.length);
       word.length = 0;
       i--;
     } else { // then separator
-      record(parseidx++, find_word([c]), 1, i+2);
+      record(parseidx++, find_word(i, [c]), 1, i+2);
     }
   }
   if (parseidx < maxparse && word.length > 0) {
-    record(parseidx++, find_word(word), word.length, i+2-word.length);
+    record(parseidx++, find_word(i, word), word.length, i+2-word.length);
   }
   this.setU8(parseaddr+1, parseidx);
 };
@@ -2298,6 +2302,7 @@ ZMachine.prototype.print_char = function (zscii_char) {
   }
 };
 ZMachine.prototype.print = function (addr) {
+  this.dis.add_string(addr);
   var z = this.getZSCII(addr);
   if (this.stream3.length > 0) {
     this.stream3[this.stream3.length - 1][1].push(z);
@@ -2686,6 +2691,33 @@ function rgb15to32(rgb15) {
 }
 
 $(function () {
+
+  $('#dump_routines').on("click", function (e) {
+    var raddrs = Array.from(zmach.routines.keys());
+    raddrs.sort(function (a, b) { return a - b; });
+    var out = [];
+    raddrs.forEach(function (raddr) {
+      out.push(''+zmach.routines.get(raddr).compiled);
+    });
+    var strings = ["var game_strings = new Map;"];
+    var saddrs = Array.from(zmach.dis.string_addrs);
+    saddrs.sort(function (a, b) { return a - b; });
+    saddrs.forEach(function (saddr) {
+      var s = zmach.unicodeFromZSCII(zmach.getZSCII(saddr));
+      strings.push("game_strings.set(" + saddr + ", "
+                   + JSON.stringify(s)+");");
+    });
+    out.push(strings.join('\n'));
+    var text = out.join('\n\n');
+    var blob = new Blob([text], {type:"text/plain;charset=utf-8"});
+    var $link = $('<a target="_blank">');
+    $link
+      .attr("href", URL.createObjectURL(blob))
+      .attr("download", "zmach_gen_routines.js");
+    $link.appendTo(document.body);
+    $link[0].click();
+    $link.remove();
+  });
 
   var zmach = new ZMachine(coreData);
   window.zmach = zmach;
