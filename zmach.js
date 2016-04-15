@@ -1466,13 +1466,14 @@ ZMachine.prototype.set_screen = function (screen) {
 };
 ZMachine.prototype.run = function () {
   this.reset();
-  this.get_routine(this.entry-1);
   try {
+    this.get_routine(this.entry-1);
     this.indcall(this.entry-1);
   } catch (x) {
     if (x instanceof PauseException) {
       this.handlePause(x);
     } else {
+      this.screen.error(x.toString());
       throw x;
     }
   }
@@ -1488,7 +1489,8 @@ ZMachine.prototype.outer_resume = function (frame, ret) {
     if (x instanceof PauseException) {
       this.handlePause(x);
     } else {
-      throw x
+      this.screen.error(x.toString());
+      throw x;
     }
   }
 };
@@ -2476,9 +2478,14 @@ ZScreen.prototype.init = function () {
   this.lowerWindow.$el.empty();
 
   this.upperChars = [];
+  this.is_line_start = true;
   this.$curLine = $('<div class="line">').appendTo(this.lowerWindow.$el);
 
   this.clearStyle();
+};
+ZScreen.prototype.new_lower_line = function () {
+  this.is_line_start = true;
+  this.$curLine = $('<div class="line">').appendTo(this.lowerWindow.$el);
 };
 ZScreen.prototype.eraseAll = function () {
   this.erase(1);
@@ -2518,6 +2525,9 @@ ZScreen.prototype.set_window = function (num) {
     this.cursor.line = 1;
     this.cursor.col = 1;
   }
+};
+ZScreen.prototype.error = function (str) {
+  this.$el.append($('<div class=error>').text(str));
 };
 ZScreen.prototype.print = function (str) {
   if (this.curWindow === 1) {
@@ -2562,24 +2572,19 @@ ZScreen.prototype.print = function (str) {
     }
   } else {
     var lines = str.split("\n");
-    function is_only_space(str) {
-      for (var i = 0; i < str.length; i++) {
-        if (str[i] !== ' ')
-          return false;
-      }
-      return true;
-    }
     for (var i = 0; i < lines.length; i++) {
       var $span = $('<span>');
-      if (is_only_space(lines[i])) {
-        var space = '';
-        for (var j = 0; j < lines[i].length; j++) {
-          space += '&nbsp;&nbsp;';
+      var text = [];
+      for (var j = 0; j < lines[i].length; j++) {
+        if (this.is_line_start && lines[i][j] === ' ') {
+          text.push('\u2002'); // en space
+        } else {
+          this.is_line_start = false;
+          text.push(lines[i].slice(j));
+          break;
         }
-        $span.html(space);
-      } else {
-        $span.text(lines[i]);
       }
+      $span.text(text.join(''));
 
       var cls = "";
       var fg = this.curForeground;
@@ -2603,7 +2608,7 @@ ZScreen.prototype.print = function (str) {
       
       this.$curLine.append($span);
       if (i + 1 < lines.length) {
-        this.$curLine = $('<div class="line">').appendTo(this.lowerWindow.$el);
+        this.new_lower_line();
       }
     }
   }
@@ -2640,6 +2645,7 @@ ZScreen.prototype.read = function (init, callback) {
   this.readCallback = callback;
   this.$curLine.append(this.$input);
   var self = this;
+  this.$input.off("keydown.read");
   this.$input.on("keydown.read", function (e) {
     if (e.which === 13) {
       e.preventDefault();
@@ -2661,7 +2667,7 @@ ZScreen.prototype.inputEntered = function () {
   var text = this.$input.val();
   this.$input.val('').hide();
   this.$curLine.append($('<span>').text(text));
-  this.$curLine = $('<div class="line">').appendTo(this.lowerWindow.$el);
+  this.new_lower_line();
   var cb = this.readCallback;
   this.readCallback = null;
   if (cb !== null) {

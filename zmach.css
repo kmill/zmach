@@ -34,6 +34,7 @@
     padding-top: 1em;
     font-family: 'PT Serif', "Times New Roman", serif;
     font-size: 16px;
+    white-space: pre-wrap;
 /*    line-height: 18px;*/
 }
 
@@ -54,4 +55,15 @@
 }
 .userinput:focus {
     outline: none;
+}
+
+.error {
+    position: fixed;
+    background: white;
+    color: red;
+    padding: 5px;
+    border: 1px solid black;
+    z-index: 999;
+    left: 20px;
+    bottom: 20px;
 }
