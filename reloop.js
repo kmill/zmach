@@ -81,6 +81,7 @@ function reloop(blocks, entries) {
 
   // check if can create Multiple
 
+  var multentries = [];
   var multiple = [];
   var selfloops = 0;
   var multlabels = new Set();
@@ -90,20 +91,21 @@ function reloop(blocks, entries) {
     if (!enteredby.has(entry) || (selfloop = (enteredby.get(entry).size === 1
                                               && enteredby.get(entry).has(entry)))) {
       if (selfloop) selfloops++;
-      var mlabels = new Set([entry]);
-      multlabels.add(entry);
-      enteredby.forEach(function (by, label) {
-        if (-1 === entries.indexOf(label) && by.size === 1 && by.has(entry)) {
-          mlabels.add(label);
-          multlabels.add(label);
-        }
-      });
-//      console.log("mlabels", mlabels);
-      multiple.push([entry, mlabels]);
-//      mlabels.forEach(function (
+      multentries.push(entry);
     } else {
       notmultentries.push(entry);
     }
+  });
+  multentries.forEach(function (entry) {
+    var mlabels = new Set([entry]);
+    multlabels.add(entry);
+    enteredby.forEach(function (by, label) {
+      if (-1 === entries.indexOf(label) && by.size === 1 && by.has(entry)) {
+        mlabels.add(label);
+        multlabels.add(label);
+      }
+    });
+    multiple.push([entry, mlabels]);
   });
   if (multiple.length > 0 && (multiple.length !== selfloops || selfloops > 1)) {
     // allow multiple.length === selfloops so that we get
@@ -133,18 +135,21 @@ function reloop(blocks, entries) {
 
   var looplabel = gensym();
   var pre = new Set(entries); // labels which can reach entries ('pre'-entries)
-  var wvisited = new Set();
-  function walk(label) {
-    if (wvisited.has(label)) return;
-    wvisited.add(label);
-    block_branches(blocks.get(label)).forEach(function (br) {
-      walk(br);
-      if (pre.has(br)) {
-        pre.add(label);
-      }
+
+  var numnodes = enteredby.size;
+  for (var i = 0; i < numnodes; i++) {
+    // any path to an entry has length at most the number of nodes
+    enteredby.forEach(function (_, label) {
+      if (pre.has(label))
+        return;
+      block_branches(blocks.get(label)).forEach(function (br) {
+        if (pre.has(br)) {
+          pre.add(label);
+        }
+      });
     });
   }
-  entries.forEach(function (label) { walk(label); });
+
   var nextlabels = new Set();
   var innerblocks = new Map();
   pre.forEach(function (innerlab) {
