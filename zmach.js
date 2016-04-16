@@ -858,6 +858,7 @@ function convert_routine_to_js(zmach, rname, locals, code, pauseable, is_cont) {
         });
         cb.indent();
         convert_seq(entry[1], cb);
+        cb.add("break;");
         cb.dedent();
       });
       cb.add("}");
@@ -916,8 +917,8 @@ function convert_routine_to_js(zmach, rname, locals, code, pauseable, is_cont) {
       cb.add("e.abort();");
       break;
     case "cont":
-      var routine;
-      if (code[3][0] === "call" && !(routine = zmach.routines.get(code[3][1])).pauseable) {
+      var routine = zmach.routines.get(code[3][1]);
+      if (code[3][0] === "call" && routine && !routine.pauseable) {
         // TODO move this to separate optimization pass
         if (code[2] === null) {
           cb.add(convert_expr(code[3]) + ";");
@@ -1099,9 +1100,9 @@ function convert_routine_to_js(zmach, rname, locals, code, pauseable, is_cont) {
   }
   convert_statement(code, cb);
   if (pauseable) {
-    if (!local_variables.has("__cont__")) {
+/*    if (!local_variables.has("__cont__")) {
       throw new Error;
-    }
+    }*/
     cb.dedent();
     cb.indent("} catch (x) {");
     cb.indent("if (x instanceof PauseException) {");
@@ -1204,6 +1205,7 @@ function plain_prefix_op(op, a) {
 var optable = new Map;
 optable.set("or", {prec:5, op:"||", f:plain_op});
 optable.set("and", {prec:6, op:"&&", f:plain_op});
+optable.set("|", {prec:7, op:"|", f:plain_op});
 optable.set("&", {prec:9, op:"&", f:plain_op});
 optable.set("===", {prec:10, op:"===", f:plain_op});
 optable.set("!==", {prec:10, op:"!==", f:plain_op});
@@ -1391,7 +1393,8 @@ function pp(l) {
 function ZMachine(data) {
   if (!(data instanceof Uint8Array)) throw new Error("data must be Uint8Array");
 
-  this.data = data;
+  this.pristine_data = data;
+  this.data = data.slice(0);
   this.dv = new DataView(this.data.buffer);
 
   this.dis = new Disassembler(this);
@@ -1417,6 +1420,8 @@ function ZMachine(data) {
   // spec says this.highStart >= this.staticStart, but Zork is a counterexample!
   
   this.globalBase = this.getU16(0x0C);
+
+  this.checkpoints = [];
 
   var alphabets_addr = this.getU16(0x34);
   if (alphabets_addr !== 0) {
@@ -1460,6 +1465,9 @@ function ZMachine(data) {
   ];
 
   this.screen = null;
+
+  this._scheduled_compiles = [];
+  this._compilation_task_timeout = null;
 }
 ZMachine.prototype.set_screen = function (screen) {
   this.screen = screen;
@@ -1494,10 +1502,24 @@ ZMachine.prototype.outer_resume = function (frame, ret) {
     }
   }
 };
-ZMachine.prototype.handlePause = function (pause) {
+ZMachine.prototype.save_state = function (type, pause) {
+  var dynamicData = this.data.slice(0, this.staticStart);
+  this.checkpoints.push({type:type,
+                         screen:this.screen.save_state(),
+                         dynamic:dynamicData,
+                         pause:pause});
+};
+ZMachine.prototype.restore_state = function (state) {
+  this.data.set(state.dynamic, 0);
+  this.handlePause(state.pause, true);
+};
+ZMachine.prototype.handlePause = function (pause, nosave) {
   var self = this;
   switch (pause.action) {
   case "aread":
+    if (!nosave) {
+      this.save_state("aread", pause);
+    }
     var read_buffer = pause.args[0];
     var init = this.data.subarray(read_buffer+2, read_buffer+2+this.getU8(1+read_buffer));
     this.screen.read(this.unicodeFromZSCII(init), function (str) {
@@ -1512,6 +1534,21 @@ ZMachine.prototype.handlePause = function (pause) {
     this.screen.read_char(function (c) {
       self.outer_resume(pause.frame, c);
     });
+    break;
+  case "save_undo":
+    this.save_state("save_undo", pause);
+    this._undo = this.checkpoints[this.checkpoints.length-1];
+    this.outer_resume(pause.frame, 1);
+    break;
+  case "restore_undo":
+    if (this._undo) {
+      var undo = this._undo;
+      this._undo = null;
+      this.data.set(undo.dynamic);
+      this.outer_resume(undo.pause.frame, 2);
+    } else {
+      this.outer_resume(pause.frame, 0);
+    }
     break;
   default:
     throw new Error("Unhandled pause action: " + pause.action);
@@ -1596,6 +1633,25 @@ ZMachine.prototype.lex = function (textaddr, parseaddr) {
   }
   this.setU8(parseaddr+1, parseidx);
 };
+ZMachine.prototype.scan_table = function (x, table, len, form) {
+  if (arguments.length < 4) {
+    form = 0x82;
+  }
+  var size = form & 0x3F;
+  for (var i = 0; i < len; i++) {
+    var e;
+    var addr = table + size * i;
+    if (form & 0x80) {
+      e = this.getU16(addr);
+    } else {
+      e = this.getU8(addr);
+    }
+    if (e === x) {
+      return addr;
+    }
+  }
+  return 0;
+};
 ZMachine.prototype.pindcall = function (paddr) {
   var args = new Array(arguments.length-1);
   for (var i = 1; i < arguments.length; i++) {
@@ -1617,15 +1673,38 @@ ZMachine.prototype.debug = function (addr) {
   debugger;
   return this.indcall(addr);
 };
-ZMachine.prototype.get_routine = function (_addr) {
-  if (this.routines.has(_addr)) {
-    return this.routines.get(_addr);
+ZMachine.prototype.make_routine_stub = function (addr) {
+  if (!this.routines.has(addr)) {
+    var self = this;
+    this['r$'+hexWord(addr)] = function stub() {
+      return self.get_routine(addr).compiled.apply(null, arguments);
+    };
+  }
+};
+ZMachine.prototype.schedule_compilation_task = function () {
+  if (this._compilation_task_timeout === null) {
+    var self = this;
+    this._compilation_task_timeout = window.setTimeout(function () {
+      self._compilation_task_timeout = null;
+      self.compilation_task();
+    }, 0);
+  }
+};
+ZMachine.prototype.compilation_task = function () {
+  /* compiles things in this._scheduled_compiles */
+
+  if (this._scheduled_compiles.length === 0) {
+    return;
   }
   var raddrs = [];
-  var addrs_to_see = [_addr];
+  var addrs_to_see = [this._scheduled_compiles.pop()];
+  var routine;
   while (addrs_to_see.length > 0) {
     var raddr = addrs_to_see.pop();
     if (-1 !== raddrs.indexOf(raddr))
+      continue;
+    routine = this.routines.get(raddr);
+    if (routine && !routine.temporary)
       continue;
     raddrs.push(raddr);
     var numlocals = this.getU8(raddr);
@@ -1634,10 +1713,9 @@ ZMachine.prototype.get_routine = function (_addr) {
       code = ["return", ["lit", 0]];
     } else {
       var blocks = this.dis.trans(raddr+1);
-//      debugger;
       code = build_code(reloop(blocks, [raddr+1]));
     }
-    var routine = new Routine(raddr, numlocals, code);
+    routine = new Routine(raddr, numlocals, code);
     this.routines.set(raddr, routine);
     var r_addresses = this.dis.get_new_routines();
     routine.calls = r_addresses;
@@ -1664,8 +1742,57 @@ ZMachine.prototype.get_routine = function (_addr) {
     rout.compiled = fun;
     this["r$"+hexWord(rout.addr)] = fun;
   }
-  
-  return this.routines.get(_addr);
+
+  $("#debug_messages").text(this.routines.size + " routines");
+
+  for (var i = this._scheduled_compiles.length-1; i >= 0; i--) {
+    var routine = this.routines.get(this._scheduled_compiles[i]);
+    if (routine && !routine.temporary) {
+      this._scheduled_compiles.splice(i, 1);
+    }
+  }
+
+  this.schedule_compilation_task();
+};
+ZMachine.prototype.get_routine = function (raddr) {
+  if (this.routines.has(raddr)) {
+    return this.routines.get(raddr);
+  }
+  this._scheduled_compiles.push(raddr);
+  this.schedule_compilation_task();
+  var numlocals = this.getU8(raddr);
+  var code;
+  if (raddr === 0) {
+    code = ["return", ["lit", 0]];
+  } else {
+    var blocks = this.dis.trans(raddr+1);
+    code = build_code(reloop(blocks, [raddr+1]));
+  }
+  var rout = new Routine(raddr, numlocals, code);
+  this.routines.set(raddr, rout);
+  var r_addresses = this.dis.get_new_routines();
+  rout.temporary = true; // that is, should be recompiled
+  rout.calls = r_addresses;
+  rout.pause = this.dis.get_pause();
+  rout.indcall = this.dis.get_indcall();
+  r_addresses.forEach(function (addr) {
+    if (!this.routines.has(addr)) {
+      this.make_routine_stub(addr);
+    }
+  }, this);
+  rout.code = optimize_code(rout.code);
+  var js = convert_routine_to_js(this,
+                                 "r$"+rout.addr.toString(16),
+                                 rout.locals, rout.code, true, false);
+  try {
+    var fun = (new Function("e", "return ("+js+");"))(this);
+  } catch (x) {
+    console.log(js);
+    throw x;
+  }
+  rout.compiled = fun;
+  this["r$"+hexWord(rout.addr)] = fun;
+  return rout;
 };
 ZMachine.prototype.get_cont = function (frame) {
   if (this.conts.has(frame.cont)) {
@@ -2333,6 +2460,12 @@ ZMachine.prototype.print_obj = function (obj) {
     this.print(props + 1);
   }
 };
+ZMachine.prototype.save_undo = function () {
+  throw new PauseException("save_undo", [], null);
+};
+ZMachine.prototype.restore_undo = function () {
+  throw new PauseException("restore_undo", [], null);
+};
 var transcript =
       // [
       //   "se",
@@ -2385,7 +2518,7 @@ ZMachine.prototype.output_stream = function (number, table) {
       }
     }
     this.setU16(entry[0], len);
-    //console.log(this.unicodeFromZSCII(this.data.slice(entry[0]+2, entry[0]+2+len)));
+    //console.log("stream3",this.unicodeFromZSCII(this.data.slice(entry[0]+2, entry[0]+2+len)));
   } else {
     console.log("output_stream", number, table);
   }
@@ -2442,19 +2575,23 @@ function ZScreen($dest, lines, cols) {
   this.curForeground = null;
   this.curBackground = null;
 
+  this.$upper = $('<div class="upperWindow">').appendTo(this.$el);
+  this.$lower = $('<div class="lowerWindow">').appendTo(this.$el),
+
   this.upperWindow = {
-    lines: 0,
-    $el: $('<div class="upperWindow">').appendTo(this.$el)
+    lines: 0
   };
+  this.upperChars = [];
+
   this.lowerWindow = {
-    lines: 0,
-    $el: $('<div class="lowerWindow">').appendTo(this.$el),
+    lines: 0
   };
   this.cursor = {
     line: 1,
     col: 1
   };
   this.readCallback = null;
+  this.input_history = [];
   this.$input = $('<input type="text" class="userinput">').appendTo(this.$el);
   this.$input.hide();
 
@@ -2479,18 +2616,22 @@ ZScreen.prototype.init = function () {
   this.cursor.line = 1;
   this.cursor.col = 1;
   this.curWindow = 0;
-  this.upperWindow.$el.empty();
-  this.lowerWindow.$el.empty();
+  this.$upper.empty();
+  this.$lower.empty();
 
-  this.upperChars = [];
   this.is_line_start = true;
-  this.$curLine = $('<div class="line">').appendTo(this.lowerWindow.$el);
+  this.$curLine = $('<div class="line">').appendTo(this.$lower);
 
   this.clearStyle();
 };
+ZScreen.prototype.save_state = function () {
+  return {
+    input_history: this.input_history.slice()
+  };
+};
 ZScreen.prototype.new_lower_line = function () {
   this.is_line_start = true;
-  this.$curLine = $('<div class="line">').appendTo(this.lowerWindow.$el);
+  this.$curLine = $('<div class="line">').appendTo(this.$lower);
 };
 ZScreen.prototype.eraseAll = function () {
   this.erase(1);
@@ -2502,25 +2643,37 @@ ZScreen.prototype.erase = function (num) {
       this.upperChars[i].html("&nbsp;");
     }
   } else if (num === 0) {
-    this.lowerWindow.$el.empty();
+    this.$lower.empty();
   }
 };
 ZScreen.prototype.split_window = function (lines) {
   this.upperWindow.lines = lines;
   this.lowerWindow.lines = this.lines - lines;
-  this.upperWindow.$el.empty();
-  this.upperChars = this.upperChars.slice(0, lines * this.cols);
+  this.$upper.empty();
+//  this.upperChars = this.upperChars.slice(0, lines * this.cols);
   for (var i = 0; i < lines * this.cols; i += this.cols) {
-    var $line = $('<div class="upperLine">').appendTo(this.upperWindow.$el);
+    var line = document.createElement("div");
+    line.className = "upperLine";
+    this.$upper[0].appendChild(line);
     for (var j = 0; j < this.cols; j++) {
-      var $char = this.upperChars[i+j] = this.upperChars[i+j] || $('<div class="upperChar">').html("&nbsp");
-      $char.appendTo($line);
+      var char = this.upperChars[i+j];
+      if (!char) {
+        char = document.createElement("div");
+        char.className = "upperChar";
+        char.appendChild(document.createTextNode('\u00a0')); // nbsp
+        this.upperChars[i+j] = char;
+      } else {
+        char.firstChild.nodeValue = '\u00a0'; // nbsp
+        char.className = "upperChar";
+        char.style.backgroundColor = this.curBackground;
+      }
+      line.appendChild(char);
     }
   }
-  var upperHeight = this.upperWindow.$el.height();
-  this.lowerWindow.$el.css("padding-top", upperHeight + 10);
-  if ($char) {
-    this.lowerWindow.$el.width(this.upperWindow.$el.width());
+  var upperHeight = this.$upper.innerHeight();
+  this.$lower.css("padding-top", upperHeight + 10);
+  if (char) {
+    this.$lower.width(this.$upper.innerWidth());
   }
 
 };
@@ -2544,9 +2697,9 @@ ZScreen.prototype.print = function (str) {
         continue;
       }
       var pos = (this.cursor.line - 1)*this.cols + this.cursor.col - 1;
-      var $char = this.upperChars[pos];
-      if ($char) {
-        $char.text(str[i]);
+      var char = this.upperChars[pos];
+      if (char) {
+        char.firstChild.nodeValue = str[i];
 
         var cls = "upperChar";
         var fg = this.curForeground;
@@ -2561,9 +2714,9 @@ ZScreen.prototype.print = function (str) {
         if (this.textBold) {
           cls += " textBold";
         }
-        $char[0].className = cls;
-        $char[0].style.color = fg;
-        $char[0].style.backgroundColor = bg;
+        char.className = cls;
+        char.style.color = fg;
+        char.style.backgroundColor = bg;
       }
       this.cursor.col++;
       if (this.cursor.col > this.cols) {
@@ -2651,16 +2804,38 @@ ZScreen.prototype.read = function (init, callback) {
   this.$curLine.append(this.$input);
   var self = this;
   this.$input.off("keydown.read");
+  var index = -1; // -1 means current input (not history)
+  var saved = null;
   this.$input.on("keydown.read", function (e) {
-    if (e.which === 13) {
+    if (e.which === 38) { // up arrow
       e.preventDefault();
       e.stopPropagation();
+      if (index === -1) {
+        saved = self.$input.val();
+        index = self.input_history.length - 1;
+      } else if (index > 0) {
+        index--;
+      }
+      self.$input.val(self.input_history[index]);
+    } else if (e.which === 40) { // down arrow
+      e.preventDefault();
+      e.stopPropagation();
+      if (index + 1 === self.input_history.length) {
+        self.$input.val(saved);
+        index = -1;
+      } else if (index !== -1) {
+        self.$input.val(self.input_history[++index]);
+      }
+    } else if (e.which === 13) { // enter
+      e.preventDefault();
+      e.stopPropagation();
+      self.input_history.push(self.$input.val());
       self.inputEntered();
     }
   });
   this.$input.val(init);
   this.$input.show();
-  var inpWidth = this.lowerWindow.$el.innerWidth() - this.$input.position().left;
+  var inpWidth = this.$lower.innerWidth() - this.$input.position().left;
   this.$input.width(inpWidth-4);
   this.$input.focus();
 };
@@ -2722,7 +2897,7 @@ $(function () {
   var zmach = new ZMachine(coreData);
   window.zmach = zmach;
 
-  var zscr = new ZScreen($("#mainscreen"), 25, 80);
+  var zscr = new ZScreen($("#mainscreen"), 255, 80); // infinite lines
 
   zmach.set_screen(zscr);
 
