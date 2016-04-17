@@ -137,18 +137,20 @@ function reloop(blocks, entries) {
   var pre = new Set(entries); // labels which can reach entries ('pre'-entries)
 
   var numnodes = enteredby.size;
-  for (var i = 0; i < numnodes; i++) {
-    // any path to an entry has length at most the number of nodes
+  var changed;
+  do {
+    changed = false;
     enteredby.forEach(function (_, label) {
       if (pre.has(label))
         return;
       block_branches(blocks.get(label)).forEach(function (br) {
-        if (pre.has(br)) {
+        if (pre.has(br) && !pre.has(label)) {
+          changed = true;
           pre.add(label);
         }
       });
     });
-  }
+  } while (changed);
 
   var nextlabels = new Set();
   var innerblocks = new Map();
