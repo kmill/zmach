@@ -1843,7 +1843,11 @@ ZMachine.prototype.resolve_pauseable = function (addrs) {
   var pauseable_lat = new Set; // contained means pauseable
   var changed;
   var i, j;
+  var routines = this.routines;
   function get_pauseable(addr) {
+    if (routines.has(addr) && routines.get(addr).pauseable !== null) {
+      return routines.get(addr).pauseable;
+    }
     return pauseable_lat.has(addr);
   }
   function set_pauseable(addr, val) {
@@ -2349,6 +2353,7 @@ ZMachine.prototype.put_prop = function (obj, prop, val) {
   throw new Error("property does not exist for object");
 };
 ZMachine.prototype.random = function (range) {
+  range = range << 16 >> 16;
   function random32() {
     var top = (Math.random()*(1<<16))|0;
     var bot = (Math.random()*(1<<16))|0;
@@ -2897,7 +2902,7 @@ $(function () {
   var zmach = new ZMachine(coreData);
   window.zmach = zmach;
 
-  var zscr = new ZScreen($("#mainscreen"), 255, 80); // infinite lines
+  var zscr = new ZScreen($("#mainscreen"), 40, 80);
 
   zmach.set_screen(zscr);
 
@@ -2920,5 +2925,3 @@ $(function () {
   $("#output").text(text);*/
 
 });
-
-
