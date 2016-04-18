@@ -311,6 +311,7 @@ Disassembler.prototype.trans = function (addr) {
   return blocks;
 };
 
+// configures a Disassembler with all opcodes
 function attachOpcodes(disassembler) {
     // s1 >> s2
   function cc(s1, s2) {
@@ -708,93 +709,102 @@ function attachOpcodes(disassembler) {
   op(1013, "set_true_colour", {}, mk_extern("set_true_colour"));
 }
 
+///
+/// Higher-level restructuring
+///
+
 function block_branches(block) {
   return trans_branches(block[block.length-1]) || [];
 }
+
+// (relooper is in relooper.js)
 
 function br_is_break(br) { return br instanceof Array && br[0] === "break"; }
 function br_is_continue(br) { return br instanceof Array && br[0] === "continue"; }
 function br_is_return(br) { return br instanceof Array && br[0] === "return"; }
 function br_is_addr(br) { return !(br instanceof Array); }
 
-// hard to eliminate labels while generating code because of scavenging
-function _build_code(b) {
-  function proc_label(code, br) {
-    if (br_is_addr(br)) {
-      return [["set", ["var", "__label__"], ["lit", br]]];
-    } else if (br_is_continue(br) || br_is_break(br)) {
-      return [["set", ["var", "__label__"], ["lit", br[2]]],
-              [br[0], br[1]]];
-    } else if (br_is_return(br)) {
-      return [br];
-    } else throw new Error;
-  }
-  function scavenge(label) {
-    var h;
-    if (br_is_addr(label)
-        && next && next instanceof Multiple) {
-      var idx = next.handled.findIndex(function (h) {
-        return -1 !== h.entries().indexOf(label);
-      });
-      if (idx !== -1) {
-        h = next.handled[idx];
-        var handled = next.handled.slice();
-        handled.splice(idx, 1);
-        next = new Multiple(next.name, handled, next.next);
-        return [["block", next.name, _build_code(h)]];
-      }
-    }
-    if (br_is_addr(label)
-        && next && next instanceof Simple && next.label === label) {
-      // ASSUMPTION: in a branch, the labels are different
-      // (next block can only be simple if return/break/continue other branch)
-      h = next;
-      next = null;
-      return _build_code(h);
-    }
-    return proc_label([], label);
-  }
-  var code, next, last;
-
-  if (!b) {
-    return [];
-  } else if (b instanceof Simple) {
-    code = [["comment", b.label]].concat(b.block.slice(0, -1));
-    next = b.next;
-    last = b.block[b.block.length-1];
-    if (last[0] !== "branch") {
-      code.push(last);
-    } else {
-      var test = last[1],
-          iftrue = last[2],
-          iffalse = last[3];
-      if (test === null) {
-        code = code.concat(scavenge(iftrue));
-      } else {
-        code.push(["if", test, scavenge(iftrue), scavenge(iffalse)]);
-      }
-    }
-    if (next) {
-      code = code.concat(_build_code(next));
-    }
-    return code;
-  } else if (b instanceof Loop) {
-    return [["loop", b.name, _build_code(b.inner)]].concat(_build_code(b.next));
-  } else if (b instanceof Multiple) {
-    if (b.handled.length === 0) {
-      return _build_code(b.next);
-    }
-    var entries = b.handled.map(function (h) { return [h.entries(), _build_code(h)];});
-    return [["switch", b.name, ["var", "__label__"], entries]].concat(_build_code(b.next));
-  } else {
-    throw new Error;
-  }
-}
+// converts relooped code to IR
 function build_code(b) {
   return blockify(_build_code(b, []));
+
+  // hard to eliminate labels while generating code because of scavenging
+  function _build_code(b) {
+    function proc_label(code, br) {
+      if (br_is_addr(br)) {
+        return [["set", ["var", "__label__"], ["lit", br]]];
+      } else if (br_is_continue(br) || br_is_break(br)) {
+        return [["set", ["var", "__label__"], ["lit", br[2]]],
+                [br[0], br[1]]];
+      } else if (br_is_return(br)) {
+        return [br];
+      } else throw new Error;
+    }
+    function scavenge(label) {
+      var h;
+      if (br_is_addr(label)
+          && next && next instanceof Multiple) {
+        var idx = next.handled.findIndex(function (h) {
+          return -1 !== h.entries().indexOf(label);
+        });
+        if (idx !== -1) {
+          h = next.handled[idx];
+          var handled = next.handled.slice();
+          handled.splice(idx, 1);
+          next = new Multiple(next.name, handled, next.next);
+          return [["block", next.name, _build_code(h)]];
+        }
+      }
+      if (br_is_addr(label)
+          && next && next instanceof Simple && next.label === label) {
+        // ASSUMPTION: in a branch, the labels are different
+        // (next block can only be simple if return/break/continue other branch)
+        h = next;
+        next = null;
+        return _build_code(h);
+      }
+      return proc_label([], label);
+    }
+    var code, next, last;
+
+    if (!b) {
+      return [];
+    } else if (b instanceof Simple) {
+      code = [["comment", b.label]].concat(b.block.slice(0, -1));
+      next = b.next;
+      last = b.block[b.block.length-1];
+      if (last[0] !== "branch") {
+        code.push(last);
+      } else {
+        var test = last[1],
+            iftrue = last[2],
+            iffalse = last[3];
+        if (test === null) {
+          code = code.concat(scavenge(iftrue));
+        } else {
+          code.push(["if", test, scavenge(iftrue), scavenge(iffalse)]);
+        }
+      }
+      if (next) {
+        code = code.concat(_build_code(next));
+      }
+      return code;
+    } else if (b instanceof Loop) {
+      return [["loop", b.name, _build_code(b.inner)]].concat(_build_code(b.next));
+    } else if (b instanceof Multiple) {
+      if (b.handled.length === 0) {
+        return _build_code(b.next);
+      }
+      var entries = b.handled.map(function (h) { return [h.entries(), _build_code(h)];});
+      return [["switch", b.name, ["var", "__label__"], entries]].concat(_build_code(b.next));
+    } else {
+      throw new Error;
+    }
+  }
 }
 
-
+// takes a list of instructions and sequences them (using "block" if
+// plural).
 function blockify(codes) {
   if (codes.length === 1) {
     return codes[0];
@@ -802,6 +812,10 @@ function blockify(codes) {
     return ["block", null, codes];
   }
 }
+
+///
+/// IR to javascript
+///
 
 function convert_routine_to_js(zmach, rname, locals, code, pauseable, is_cont) {
   var local_variables = new Set;
@@ -1166,7 +1180,6 @@ function convert_routine_to_js(zmach, rname, locals, code, pauseable, is_cont) {
           + vardefs + cb.toString());
 }
 
-
 function parens(oprec, a) {
   if (oprec < a.prec) {
     return a.js;
@@ -1237,98 +1250,20 @@ function Routine(addr, locals, code) {
   this.code = code;
 
   this.pauseable = null;
+  this.compiled = null;
+  this.temporary = false;
 }
 
-
-function beginDis(z, addr) {
-  var $el = $('#blocks');
-  var $last = null;
-  $el.children().each(function (i, el) {
-    if (+$(el).attr("data-addr") <= addr) {
-      $last = $(el);
-    }
-  });
-  if ($last && $last.attr("data-addr") == ''+addr) return;
-
-  var $block = $('<div class="block">').attr("data-addr", addr);;
-  if ($last === null) {
-    $el.append($block);
-  } else {
-    $block.insertAfter($last);
-  }
-  var $label = $('<div class="label">').text("$" + hexWord(addr));
-  $label.appendTo($block);
-
-  var pc = addr;
-  do {
-    var inst = disassemble(z, pc);
-    $block.append($('<div>').text(explain_inst(inst)));
-    pc = inst.pc;
-  } while (!inst.stop);
-}
-
-function getZString(zmach, addr, s) {
-  var s = s || []; // in ZSCII
-  var alpha = 0;
-  var abbrev = -1;
-  var c2;
-
-  var tables = [
-    "abcdefghijklmnopqrstuvwxyz",
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-    " \n0123456789.,!?_#'\"/\\-:()"
-  ];
-  
-  do {
-    var c = zmach.getU16(addr);
-    addr += 2;
-    var stop = c & 0x8000;
-    for (var i = 0; i < 3; i++) {
-      var z = (c >> 10) & 0x1F;
-      c <<= 5;
-
-//      s.push("(:"+z+":)");
-
-      if (abbrev === -3) {
-        c2 = z << 5;
-        abbrev = -2;
-        continue;
-      } else if (abbrev === -2) {
-        s.push(c2 | z);
-        abbrev = -1;
-      } else if (abbrev >= 0) {
-        //        s.push("{{{");
-        getZString(zmach, 2*zmach.getU16(zmach.getU16(0x18) + 2*(32*abbrev+z)), s);
-//        s.push("}}}");
-        abbrev = -1;
-      } else if (0 === z) {
-        s.push(32);
-      } else if (z <= 3) {
-        abbrev = z-1;
-      } else if (z <= 5) {
-        alpha = (z - 3) + alpha;
-        if (alpha >= 3) alpha -= 3;
-        continue;
-      } else if (alpha === 2 && z === 6) {
-        abbrev = -3;
-        continue;
-      } else {
-        // TODO check 0x34
-
-        s.push(tables[alpha].charCodeAt(z-6));
-      }
-
-      alpha = 0;
-      //s.push(":" + z);
-    }
-  } while (!stop);
-  return s.map(c => typeof c === "string" ? c : String.fromCharCode(c)).join('');
-}
+///
+/// Printing routines for debugging
+///
 
 function sexp(l) {
   if (l instanceof Array) {
-    if (l[0] === "string") {
-      return JSON.stringify(getZString(window.zmach, l[1]));
+    if (l[0] === "string" && window.zmach) {
+      var zmach = window.zmach;
+      var s = zmach.unicodeFromZSCII(zmach.getZSCII(l[1]))
+      return JSON.stringify(s);
     }
     return "(" + l.map(sexp).join(" ") + ")";
   } else if (typeof l === "number") {
@@ -1389,6 +1324,11 @@ function pp(l) {
   _pp(l);
   return cb.toString();
 }
+
+
+///
+/// The Z-Machine runtime (with recompilation-based interpreter)
+///
 
 function ZMachine(data) {
   if (!(data instanceof Uint8Array)) throw new Error("data must be Uint8Array");
@@ -1469,9 +1409,54 @@ function ZMachine(data) {
   this._scheduled_compiles = [];
   this._compilation_task_timeout = null;
 }
+// Initialization
+ZMachine.prototype.reset = function () {
+  var flags1 = this.getU8(0x1);
+  flags1 |= ZMachine.FLAGS1_COLORS;
+  flags1 |= ZMachine.FLAGS1_BOLDFACE;
+  flags1 |= ZMachine.FLAGS1_ITALIC;
+  flags1 |= ZMachine.FLAGS1_FIXEDSPACE;
+  flags1 &= ~ZMachine.FLAGS1_TIMEDINPUT;
+  this.setU8(0x1, flags1);
+
+  var flags2 = this.getU16(0x10);
+  flags2 &=~ZMachine.FLAGS2_PICTURES;
+  flags2 &=~ZMachine.FLAGS2_SOUND;
+  this.setU16(0x10, flags2);
+
+  this.setU8(0x1E, 6/* IBM PC */); // Interpreter number
+  this.setU8(0x1F, 'J'.charCodeAt(0)); // Interpreter version
+
+  this.setDim(this.screen.lines, this.screen.cols);
+
+  this.setU8(0x2C, 9/*white*/); // default background color
+  this.setU8(0x2D, 2/*black*/); // default foreground color
+  
+  this.setU16(0x32, 0x0101); // standard version number
+
+  //var flags3 = this.getExtension(4); // only v6
+
+  this.setExtension(5, this.true_colors[9]);
+  this.setExtension(6, this.true_colors[2]);
+
+  this.screen.setBackground(this.true_colors[9]);
+  this.screen.setForeground(this.true_colors[2]);
+
+  this.stream3 = [];
+};
 ZMachine.prototype.set_screen = function (screen) {
   this.screen = screen;
 };
+ZMachine.prototype.setDim = function (height, width) {
+  this.setU8(0x20, height);
+  this.setU8(0x21, width);
+  this.setU16(0x22, 800); // pixel width
+  this.setU16(0x24, 400); // pixel height
+  this.setU8(0x26, 10); // font width in pixels (for '0')
+  this.setU8(0x27, 16); // font height in pixels (for '0')
+};
+
+// Interpreter
 ZMachine.prototype.run = function () {
   this.reset();
   try {
@@ -1479,7 +1464,7 @@ ZMachine.prototype.run = function () {
     this.indcall(this.entry-1);
   } catch (x) {
     if (x instanceof PauseException) {
-      this.handlePause(x);
+      this.handle_pause(x);
     } else {
       this.screen.error(x.toString());
       throw x;
@@ -1495,25 +1480,14 @@ ZMachine.prototype.outer_resume = function (frame, ret) {
     this.resume(frame, ret);
   } catch (x) {
     if (x instanceof PauseException) {
-      this.handlePause(x);
+      this.handle_pause(x);
     } else {
       this.screen.error(x.toString());
       throw x;
     }
   }
 };
-ZMachine.prototype.save_state = function (type, pause) {
-  var dynamicData = this.data.slice(0, this.staticStart);
-  this.checkpoints.push({type:type,
-                         screen:this.screen.save_state(),
-                         dynamic:dynamicData,
-                         pause:pause});
-};
-ZMachine.prototype.restore_state = function (state) {
-  this.data.set(state.dynamic, 0);
-  this.handlePause(state.pause, true);
-};
-ZMachine.prototype.handlePause = function (pause, nosave) {
+ZMachine.prototype.handle_pause = function (pause, nosave) {
   var self = this;
   switch (pause.action) {
   case "aread":
@@ -1553,104 +1527,6 @@ ZMachine.prototype.handlePause = function (pause, nosave) {
   default:
     throw new Error("Unhandled pause action: " + pause.action);
   }
-};
-ZMachine.prototype.lex = function (textaddr, parseaddr) {
-  var len = this.getU8(textaddr+1);
-  var maxparse = this.getU8(parseaddr);
-
-  var i;
-
-  var seps = [];
-  var numseps = this.getU8(this.dict);
-  for (i = 0; i < numseps; i++) {
-    seps[i] = this.getU8(this.dict + 1 + i);
-  }
-
-  var entry_length = this.getU8(this.dict + 1 + numseps);
-  var num_entries = this.getU16(this.dict + 1 + numseps + 1);
-  var dict_start = this.dict + 1 + numseps + 3;
-
-  function encodedToInt(encoded) {
-    return ((((encoded[0] << 8)
-              |encoded[1]) * 4 * (1<<30))
-            +(encoded[2] << 24)
-            +(encoded[3] << 16)
-            +(encoded[4] << 8)
-            +encoded[5]);
-  }
-
-  var self = this;
-  function find_word(wordnum, chars) {
-    var word = encodedToInt(self.fromZSCII(0x5, chars));
-    var lo = 0;
-    var hi = num_entries-1;
-    while (lo <= hi) {
-      var mid = lo + ((hi - lo) >> 1);
-      var entry = dict_start + entry_length * mid;
-      var entryWord =
-            (self.dv.getUint16(entry, false) * 4 * (1<<30))
-            + self.dv.getUint32(entry + 2, false);
-      if (word === entryWord) {
-        return entry;
-      } else if (word < entryWord) {
-        hi = mid - 1;
-      } else if (word > entryWord) {
-        lo = mid + 1;
-      }
-    }
-    if (wordnum === 1 && chars.length === 1 && chars[0] === 'x'.charCodeAt(0)) {
-      // Zork I doesn't supply this synonym.
-      return find_word(-1, self.unicodeToZSCII("examine"));
-    }
-    return 0;
-  }
-  function record(parseidx, word, length, offset) {
-    var p = parseaddr + 2 + 4*parseidx;
-    self.setU16(p, word);
-    self.setU8(p+2, length);
-    self.setU8(p+3, offset);
-  }
-
-  var word = [];
-  var parseidx = 0;
-  for (i = 0; i < len && parseidx < maxparse; i++) {
-    var c = this.getU8(textaddr + 2 + i);
-    var sepidx = seps.indexOf(c);
-    if (c === 32 && word.length === 0) {
-      continue;
-    } else if (c !== 32 && sepidx === -1) {
-      word.push(c);
-    } else if (word.length > 0) {
-      record(parseidx++, find_word(i, word), word.length, i+2-word.length);
-      word.length = 0;
-      i--;
-    } else { // then separator
-      record(parseidx++, find_word(i, [c]), 1, i+2);
-    }
-  }
-  if (parseidx < maxparse && word.length > 0) {
-    record(parseidx++, find_word(i, word), word.length, i+2-word.length);
-  }
-  this.setU8(parseaddr+1, parseidx);
-};
-ZMachine.prototype.scan_table = function (x, table, len, form) {
-  if (arguments.length < 4) {
-    form = 0x82;
-  }
-  var size = form & 0x3F;
-  for (var i = 0; i < len; i++) {
-    var e;
-    var addr = table + size * i;
-    if (form & 0x80) {
-      e = this.getU16(addr);
-    } else {
-      e = this.getU8(addr);
-    }
-    if (e === x) {
-      return addr;
-    }
-  }
-  return 0;
 };
 ZMachine.prototype.pindcall = function (paddr) {
   var args = new Array(arguments.length-1);
@@ -1845,7 +1721,9 @@ ZMachine.prototype.resolve_pauseable = function (addrs) {
   var i, j;
   var routines = this.routines;
   function get_pauseable(addr) {
-    if (routines.has(addr) && routines.get(addr).pauseable !== null) {
+    if (routines.has(addr)
+        && !routines.get(addr).temporary
+        && routines.get(addr).pauseable !== null) {
       return routines.get(addr).pauseable;
     }
     return pauseable_lat.has(addr);
@@ -1872,6 +1750,18 @@ ZMachine.prototype.resolve_pauseable = function (addrs) {
     this.routines.get(addrs[i]).pauseable = get_pauseable(addrs[i]);
   }
 };
+ZMachine.prototype.save_state = function (type, pause) {
+  var dynamicData = this.data.slice(0, this.staticStart);
+  this.checkpoints.push({type:type,
+                         screen:this.screen.save_state(),
+                         dynamic:dynamicData,
+                         pause:pause});
+};
+ZMachine.prototype.restore_state = function (state) {
+  this.data.set(state.dynamic, 0);
+  this.handle_pause(state.pause, true);
+};
+// Memory
 ZMachine.prototype.getU8 = function (n) {
   return this.data[n];
 };
@@ -1921,61 +1811,26 @@ ZMachine.prototype.setExtension = function (word, val) {
     this.setU16Elt(this.extension, word, val);
   }
 };
-ZMachine.prototype.reset = function () {
-  var flags1 = this.getU8(0x1);
-  flags1 |= ZMachine.FLAGS1_COLORS;
-  flags1 |= ZMachine.FLAGS1_BOLDFACE;
-  flags1 |= ZMachine.FLAGS1_ITALIC;
-  flags1 |= ZMachine.FLAGS1_FIXEDSPACE;
-  flags1 &= ~ZMachine.FLAGS1_TIMEDINPUT;
-  this.setU8(0x1, flags1);
-
-  var flags2 = this.getU16(0x10);
-  flags2 &=~ZMachine.FLAGS2_PICTURES;
-  flags2 &=~ZMachine.FLAGS2_SOUND;
-  this.setU16(0x10, flags2);
-
-  this.setU8(0x1E, 6/* IBM PC */); // Interpreter number
-  this.setU8(0x1F, 'J'.charCodeAt(0)); // Interpreter version
-
-  //this.setDim(255, 80); // 255 is infinite height
-  this.setDim(this.screen.lines, this.screen.cols);
-
-  this.setU8(0x2C, 9/*white*/); // default background color
-  this.setU8(0x2D, 2/*black*/); // default foreground color
-  
-  this.setU16(0x32, 0x0101); // standard version number
-
-  //var flags3 = this.getExtension(4); // only v6
-
-  this.setExtension(5, this.true_colors[9]);
-  this.setExtension(6, this.true_colors[2]);
-
-  this.screen.setBackground(this.true_colors[9]);
-  this.screen.setForeground(this.true_colors[2]);
-
-  this.stream3 = [];
+ZMachine.prototype.scan_table = function (x, table, len, form) {
+  if (arguments.length < 4) {
+    form = 0x82;
+  }
+  var size = form & 0x3F;
+  for (var i = 0; i < len; i++) {
+    var e;
+    var addr = table + size * i;
+    if (form & 0x80) {
+      e = this.getU16(addr);
+    } else {
+      e = this.getU8(addr);
+    }
+    if (e === x) {
+      return addr;
+    }
+  }
+  return 0;
 };
-ZMachine.FLAGS1_COLORS = 1;
-ZMachine.FLAGS1_BOLDFACE = 4;
-ZMachine.FLAGS1_ITALIC = 8;
-ZMachine.FLAGS1_FIXEDSPACE = 16;
-ZMachine.FLAGS1_TIMEDINPUT = 128;
-ZMachine.FLAGS2_TRANSCRIPTING = 1;
-ZMachine.FLAGS2_FIXEDPITCH = 2;
-ZMachine.FLAGS2_PICTURES = 8;
-ZMachine.FLAGS2_UNDO = 16;
-ZMachine.FLAGS2_MOUSE = 32;
-ZMachine.FLAGS2_COLORS = 128;
-ZMachine.FLAGS2_SOUND = 256;
-ZMachine.prototype.setDim = function (height, width) {
-  this.setU8(0x20, height);
-  this.setU8(0x21, width);
-  this.setU16(0x22, 800); // pixel width
-  this.setU16(0x24, 400); // pixel height
-  this.setU8(0x26, 10); // font width in pixels (for '0')
-  this.setU8(0x27, 16); // font height in pixels (for '0')
-};
+// Strings
 ZMachine.prototype.getZSCII = function (addr, s) {
   /* Gets ZSCII for a string from the game memory */
   return this.toZSCII(this.data, addr, s);
@@ -2079,6 +1934,9 @@ ZMachine.prototype.unicodeFromZSCII = function (zscii) {
       case ZMachine.Z_NEWLINE:
         str.push('\n');
         break;
+      case ZMachine.Z_SENTENCE_SPACE:
+        str.push('\u2003'); // em space
+        break;
       default:
         break;
       }
@@ -2102,44 +1960,87 @@ ZMachine.prototype.unicodeToZSCII = function (str) {
   }
   return zscii;
 };
-ZMachine.Z_NULL = 0;
-ZMachine.Z_DELETE = 8;
-ZMachine.Z_TAB = 9; // V6
-//ZMachine.Z_SENTENCE_SPACE = 11; // V6
-ZMachine.Z_NEWLINE = 13;
-ZMachine.Z_ESCAPE = 27;
-// 32 through 126 are standard ASCII
-ZMachine.Z_CURSOR_UP = 129;
-ZMachine.Z_CURSOR_DOWN = 130;
-ZMachine.Z_CURSOR_LEFT = 131;
-ZMachine.Z_CURSOR_RIGHT = 132;
-ZMachine.Z_F1 = 133;
-ZMachine.Z_F2 = 134;
-ZMachine.Z_F3 = 135;
-ZMachine.Z_F4 = 136;
-ZMachine.Z_F5 = 137;
-ZMachine.Z_F6 = 138;
-ZMachine.Z_F7 = 139;
-ZMachine.Z_F8 = 140;
-ZMachine.Z_F9 = 141;
-ZMachine.Z_F10 = 142;
-ZMachine.Z_F11 = 143;
-ZMachine.Z_F12 = 144;
-ZMachine.Z_KEYPAD_0 = 145;
-ZMachine.Z_KEYPAD_1 = 146;
-ZMachine.Z_KEYPAD_2 = 147;
-ZMachine.Z_KEYPAD_3 = 148;
-ZMachine.Z_KEYPAD_4 = 149;
-ZMachine.Z_KEYPAD_5 = 150;
-ZMachine.Z_KEYPAD_6 = 151;
-ZMachine.Z_KEYPAD_7 = 152;
-ZMachine.Z_KEYPAD_8 = 153;
-ZMachine.Z_KEYPAD_9 = 154;
-// 155 through 251 are "extra characters"
-//ZMachine.Z_MENU_CLICK = 252; // V6
-//ZMachine.Z_DOUBLE_CLICK = 253; // V6
-ZMachine.Z_SINGLE_CLICK = 254;
+// Parsing
+ZMachine.prototype.lex = function (textaddr, parseaddr) {
+  var len = this.getU8(textaddr+1);
+  var maxparse = this.getU8(parseaddr);
 
+  var i;
+
+  var seps = [];
+  var numseps = this.getU8(this.dict);
+  for (i = 0; i < numseps; i++) {
+    seps[i] = this.getU8(this.dict + 1 + i);
+  }
+
+  var entry_length = this.getU8(this.dict + 1 + numseps);
+  var num_entries = this.getU16(this.dict + 1 + numseps + 1);
+  var dict_start = this.dict + 1 + numseps + 3;
+
+  function encodedToInt(encoded) {
+    return ((((encoded[0] << 8)
+              |encoded[1]) * 4 * (1<<30))
+            +(encoded[2] << 24)
+            +(encoded[3] << 16)
+            +(encoded[4] << 8)
+            +encoded[5]);
+  }
+
+  var self = this;
+  function find_word(wordnum, chars) {
+    var word = encodedToInt(self.fromZSCII(0x5, chars));
+    var lo = 0;
+    var hi = num_entries-1;
+    while (lo <= hi) {
+      var mid = lo + ((hi - lo) >> 1);
+      var entry = dict_start + entry_length * mid;
+      var entryWord =
+            (self.dv.getUint16(entry, false) * 4 * (1<<30))
+            + self.dv.getUint32(entry + 2, false);
+      if (word === entryWord) {
+        return entry;
+      } else if (word < entryWord) {
+        hi = mid - 1;
+      } else if (word > entryWord) {
+        lo = mid + 1;
+      }
+    }
+    if (wordnum === 1 && chars.length === 1 && chars[0] === 'x'.charCodeAt(0)) {
+      // Zork I doesn't supply this synonym.
+      return find_word(-1, self.unicodeToZSCII("examine"));
+    }
+    return 0;
+  }
+  function record(parseidx, word, length, offset) {
+    var p = parseaddr + 2 + 4*parseidx;
+    self.setU16(p, word);
+    self.setU8(p+2, length);
+    self.setU8(p+3, offset);
+  }
+
+  var word = [];
+  var parseidx = 0;
+  for (i = 0; i < len && parseidx < maxparse; i++) {
+    var c = this.getU8(textaddr + 2 + i);
+    var sepidx = seps.indexOf(c);
+    if (c === 32 && word.length === 0) {
+      continue;
+    } else if (c !== 32 && sepidx === -1) {
+      word.push(c);
+    } else if (word.length > 0) {
+      record(parseidx++, find_word(i, word), word.length, i+2-word.length);
+      word.length = 0;
+      i--;
+    } else { // then separator
+      record(parseidx++, find_word(i, [c]), 1, i+2);
+    }
+  }
+  if (parseidx < maxparse && word.length > 0) {
+    record(parseidx++, find_word(i, word), word.length, i+2-word.length);
+  }
+  this.setU8(parseaddr+1, parseidx);
+};
+// Objects
 ZMachine.prototype.obj_entry = function (obj) {
   return this.objTable + (2*63-14)+14*obj; // obj starts at 1
 };
@@ -2352,43 +2253,7 @@ ZMachine.prototype.put_prop = function (obj, prop, val) {
   }
   throw new Error("property does not exist for object");
 };
-ZMachine.prototype.random = function (range) {
-  range = range << 16 >> 16;
-  function random32() {
-    var top = (Math.random()*(1<<16))|0;
-    var bot = (Math.random()*(1<<16))|0;
-    return ((top<<16)|bot)>>>0;
-  }
-  function reseed() {
-    return {
-      x:random32(),
-      y:random32(),
-      z:random32(),
-      w:random32(),
-      v:random32()
-    };
-  }
-  if (range === 0) {
-    this._random_state = reseed();
-    return 0;
-  }
-  var st = this._random_state;
-  if (!st) {
-    st = this._random_state = reseed();
-  }
-  if (range < 0) {
-    st.x = st.y = st.z = st.w = st.v = (range>>>0);
-    return 0;
-  }
-
-  function xorshift() {
-    // https://groups.google.com/forum/#!msg/comp.lang.c/qZFQgKRCQGg/rmPkaRHqxOMJ
-    var t=(st.x^(st.x>>>7)); st.x=st.y; st.y=st.z; st.z=st.w; st.w=st.v;
-    st.v=((st.v^(st.v<<6))^(t^(t<<13)))>>>0;
-    return Math.imul(st.y+st.y+1,st.v)>>>0;
-  }
-  return 1 + xorshift() % range;
-};
+// The screen
 ZMachine.prototype.erase_window = function (num) {
   num = num << 16 >> 16;
   if (num === -1) {
@@ -2465,26 +2330,11 @@ ZMachine.prototype.print_obj = function (obj) {
     this.print(props + 1);
   }
 };
-ZMachine.prototype.save_undo = function () {
-  throw new PauseException("save_undo", [], null);
-};
-ZMachine.prototype.restore_undo = function () {
-  throw new PauseException("restore_undo", [], null);
-};
-var transcript =
-      // [
-      //   "se",
-      //   "ne",
-      //   "open window",
-      //   "w",
-      //   "w",
-      //   "take sword"
-      // ];
-      [];
 ZMachine.prototype.aread = function (text, parse, time, routine) {
   //console.log("aread request", text, parse, time, routine);
-  if (transcript.length > 0) {
-    var str = transcript.shift();
+  var skein = window.skein;
+  if (skein && skein.length > 0) {
+    var str = skein.shift();
     this.screen.print(str + "\n");
     this.do_aread(text, parse, str);
     return 13;
@@ -2528,6 +2378,102 @@ ZMachine.prototype.output_stream = function (number, table) {
     console.log("output_stream", number, table);
   }
 };
+// Saving and undo
+ZMachine.prototype.save_undo = function () {
+  throw new PauseException("save_undo", [], null);
+};
+ZMachine.prototype.restore_undo = function () {
+  throw new PauseException("restore_undo", [], null);
+};
+// Miscellaneous
+ZMachine.prototype.random = function (range) {
+  range = range << 16 >> 16;
+  function random32() {
+    var top = (Math.random()*(1<<16))|0;
+    var bot = (Math.random()*(1<<16))|0;
+    return ((top<<16)|bot)>>>0;
+  }
+  function reseed() {
+    return {
+      x:random32(),
+      y:random32(),
+      z:random32(),
+      w:random32(),
+      v:random32()
+    };
+  }
+  if (range === 0) {
+    this._random_state = reseed();
+    return 0;
+  }
+  var st = this._random_state;
+  if (!st) {
+    st = this._random_state = reseed();
+  }
+  if (range < 0) {
+    st.x = st.y = st.z = st.w = st.v = (range>>>0);
+    return 0;
+  }
+
+  function xorshift() {
+    // https://groups.google.com/forum/#!msg/comp.lang.c/qZFQgKRCQGg/rmPkaRHqxOMJ
+    var t=(st.x^(st.x>>>7)); st.x=st.y; st.y=st.z; st.z=st.w; st.w=st.v;
+    st.v=((st.v^(st.v<<6))^(t^(t<<13)))>>>0;
+    return Math.imul(st.y+st.y+1,st.v)>>>0;
+  }
+  return 1 + xorshift() % range;
+};
+
+// Constants
+ZMachine.FLAGS1_COLORS = 1;
+ZMachine.FLAGS1_BOLDFACE = 4;
+ZMachine.FLAGS1_ITALIC = 8;
+ZMachine.FLAGS1_FIXEDSPACE = 16;
+ZMachine.FLAGS1_TIMEDINPUT = 128;
+ZMachine.FLAGS2_TRANSCRIPTING = 1;
+ZMachine.FLAGS2_FIXEDPITCH = 2;
+ZMachine.FLAGS2_PICTURES = 8;
+ZMachine.FLAGS2_UNDO = 16;
+ZMachine.FLAGS2_MOUSE = 32;
+ZMachine.FLAGS2_COLORS = 128;
+ZMachine.FLAGS2_SOUND = 256;
+ZMachine.Z_NULL = 0;
+ZMachine.Z_DELETE = 8;
+ZMachine.Z_TAB = 9;
+ZMachine.Z_SENTENCE_SPACE = 11;
+ZMachine.Z_NEWLINE = 13;
+ZMachine.Z_ESCAPE = 27;
+// 32 through 126 are standard ASCII
+ZMachine.Z_CURSOR_UP = 129;
+ZMachine.Z_CURSOR_DOWN = 130;
+ZMachine.Z_CURSOR_LEFT = 131;
+ZMachine.Z_CURSOR_RIGHT = 132;
+ZMachine.Z_F1 = 133;
+ZMachine.Z_F2 = 134;
+ZMachine.Z_F3 = 135;
+ZMachine.Z_F4 = 136;
+ZMachine.Z_F5 = 137;
+ZMachine.Z_F6 = 138;
+ZMachine.Z_F7 = 139;
+ZMachine.Z_F8 = 140;
+ZMachine.Z_F9 = 141;
+ZMachine.Z_F10 = 142;
+ZMachine.Z_F11 = 143;
+ZMachine.Z_F12 = 144;
+ZMachine.Z_KEYPAD_0 = 145;
+ZMachine.Z_KEYPAD_1 = 146;
+ZMachine.Z_KEYPAD_2 = 147;
+ZMachine.Z_KEYPAD_3 = 148;
+ZMachine.Z_KEYPAD_4 = 149;
+ZMachine.Z_KEYPAD_5 = 150;
+ZMachine.Z_KEYPAD_6 = 151;
+ZMachine.Z_KEYPAD_7 = 152;
+ZMachine.Z_KEYPAD_8 = 153;
+ZMachine.Z_KEYPAD_9 = 154;
+// 155 through 251 are "extra characters"
+//ZMachine.Z_MENU_CLICK = 252; // V6
+//ZMachine.Z_DOUBLE_CLICK = 253; // V6
+ZMachine.Z_SINGLE_CLICK = 254;
 
 function PauseException(action, args, frame) {
   this.action = action;
