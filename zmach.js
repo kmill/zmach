@@ -1505,7 +1505,24 @@ ZMachine.prototype.handle_pause = function (pause, nosave) {
 
     break;
   case "read_char":
+    var read_char_timer;
+    if (pause.args[0] !== 0 && pause.args[1] !== 0) {
+      read_char_timer = window.setInterval(function () {
+        var res;
+        try {
+          res = self.pindcall(pause.args[1]);
+        } catch(x) {
+          throw new Error('Exception thrown in read_char time routine');
+        }
+        if (res) {
+          window.clearInterval(read_char_timer);
+          self.screen.cancel_read_char();
+          self.outer_resume(pause.frame, 0);
+        }
+      }, pause.args[0] * 100);
+    }
     this.screen.read_char(function (c) {
+      window.clearInterval(read_char_timer);
       self.outer_resume(pause.frame, c);
     });
     break;
@@ -2520,23 +2537,18 @@ CallFrame.prototype.describe = function () {
 
 function ZScreen($dest, lines, cols) {
   this.$el = $('<div class="zscreen">').appendTo($dest);
-  this.lines = lines;
+  this.lines = lines; // not used
   this.cols = cols;
-  this.curWindow = 0;
+  this.curWindow = 0; // 0 is lower, 1 is upper
   this.curForeground = null;
   this.curBackground = null;
 
   this.$upper = $('<div class="upperWindow">').appendTo(this.$el);
   this.$lower = $('<div class="lowerWindow">').appendTo(this.$el),
 
-  this.upperWindow = {
-    lines: 0
-  };
+  this.upperLines = 0; // for split
   this.upperChars = [];
 
-  this.lowerWindow = {
-    lines: 0
-  };
   this.cursor = {
     line: 1,
     col: 1
@@ -2555,15 +2567,19 @@ function ZScreen($dest, lines, cols) {
       e.stopPropagation();
       var rcc = self.read_char_callback;
       self.read_char_callback = null;
-      rcc(e.keyCode); // TODO translate properly
+      // TODO translate properly
+      if (e.key) {
+        rcc(e.key.charCodeAt(0));
+      } else {
+        rcc(e.keyCode);
+      }
     }
   });
   
   this.init();
 }
 ZScreen.prototype.init = function () {
-  this.upperWindow.lines = 0;
-  this.lowerWindow.lines = this.lines;
+  this.upperLines = 0;
   this.cursor.line = 1;
   this.cursor.col = 1;
   this.curWindow = 0;
@@ -2590,18 +2606,14 @@ ZScreen.prototype.eraseAll = function () {
 };
 ZScreen.prototype.erase = function (num) {
   if (num === 1) {
-    for (var i = 0; i < this.chars; i++) {
-      this.upperChars[i].html("&nbsp;");
-    }
+    this.split_window(this.upperLines);
   } else if (num === 0) {
     this.$lower.empty();
   }
 };
 ZScreen.prototype.split_window = function (lines) {
-  this.upperWindow.lines = lines;
-  this.lowerWindow.lines = this.lines - lines;
+  this.upperLines = lines;
   this.$upper.empty();
-//  this.upperChars = this.upperChars.slice(0, lines * this.cols);
   for (var i = 0; i < lines * this.cols; i += this.cols) {
     var line = document.createElement("div");
     line.className = "upperLine";
@@ -2674,8 +2686,8 @@ ZScreen.prototype.print = function (str) {
         this.cursor.line++;
         this.cursor.col = 1;
       }
-      if (this.cursor.line > this.upperWindow.lines) {
-        this.cursor.line = this.upperWindow.lines;
+      if (this.cursor.line > this.upperLines) {
+        this.cursor.line = this.upperLines;
         this.cursor.col = this.cols;
       }
     }
@@ -2713,6 +2725,9 @@ ZScreen.prototype.print = function (str) {
       }
       $span[0].className = cls;
       $span[0].style.color = fg;
+      if (bg === '#ffffff') {
+        bg = "transparent";
+      }
       $span[0].style.backgroundColor = bg;
       
       this.$curLine.append($span);
@@ -2793,6 +2808,9 @@ ZScreen.prototype.read = function (init, callback) {
 ZScreen.prototype.read_char = function (callback) {
   this.read_char_callback = callback;
   this.$el.focus();
+};
+ZScreen.prototype.cancel_read_char = function () {
+  this.read_char_callback = null;
 };
 ZScreen.prototype.inputEntered = function () {
   var text = this.$input.val();
